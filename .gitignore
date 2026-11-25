@@ -1,0 +1,32 @@
+# SwiftPM / Xcode 本地产物
+/.build/
+/.swiftpm/
+/DerivedData/
+/build/
+/dist/
+*.xcarchive
+*.ipa
+xcuserdata/
+*.xcuserstate
+
+# 签名文件与本地备份
+*.p12
+*.mobileprovision
+*.provisionprofile
+*.alos
+*.aloss
+
+# 本机覆盖、日志与临时文件
+Local.xcconfig
+*.local.xcconfig
+.env
+.env.local
+.DS_Store
+*.log
+*.tmp
+*.swp
+*.bak
+/.codegraph/
+
+# Xcode Asset Catalog 需要跟踪所有图标描述文件。
+!Sources/alioss4ios/AppAssets.xcassets/**/Contents.json
