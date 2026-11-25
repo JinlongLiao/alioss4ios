@@ -8,6 +8,8 @@ struct UploadActivityView: View {
     @Environment(UploadQueue.self) private var uploadQueue
     @Environment(\.dismiss) private var dismiss
     @State private var pendingDiscard: UploadRecord?
+    /// 保存待确认的任务，确认时显示完整远端路径。
+    @State private var pendingOverwrite: UploadRecord?
     let profiles: [StorageProfile]
 
     var body: some View {
@@ -66,6 +68,21 @@ struct UploadActivityView: View {
             } message: { record in
                 Text(record.name)
             }
+            .alert(
+                appText("覆盖远端文件？"),
+                isPresented: Binding(
+                    get: { pendingOverwrite != nil },
+                    set: { if !$0 { pendingOverwrite = nil } }
+                ),
+                presenting: pendingOverwrite
+            ) { record in
+                Button(appText("覆盖上传"), role: .destructive) {
+                    uploadQueue.resumeUpload(record, profile: sourceProfile(record), confirmOverwrite: true)
+                }
+                Button(appText("取消"), role: .cancel) {}
+            } message: { record in
+                Text(record.target.bucket.name + "/" + record.target.key)
+            }
         }
         .frame(minWidth: 340, minHeight: 390)
     }
@@ -77,7 +94,12 @@ struct UploadActivityView: View {
             Button(appText("暂停")) { uploadQueue.pauseUpload(record) }.buttonStyle(.borderless)
         } else if record.status == .paused || record.status == .failed {
             HStack {
-                Button(appText("继续")) { uploadQueue.resumeUpload(record, profile: sourceProfile(record)) }
+                Button(appText(record.allowsOverwrite == true ? "继续覆盖上传" : "继续")) {
+                    uploadQueue.resumeUpload(record, profile: sourceProfile(record))
+                }
+                if record.status == .failed && record.provider == .oss && record.allowsOverwrite != true {
+                    Button(appText("覆盖上传")) { pendingOverwrite = record }
+                }
                 Button(appText("放弃"), role: .destructive) { pendingDiscard = record }
             }
             .buttonStyle(.borderless)

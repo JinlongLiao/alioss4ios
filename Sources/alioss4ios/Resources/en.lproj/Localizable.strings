@@ -319,3 +319,6 @@
 "开启完整网页预览？" = "Enable full web preview?";
 "这将允许当前 HTML 文件运行 JavaScript 并加载 HTTPS 外部资源。不可信页面可能执行脚本或向外部服务器发送数据；文件访问、混合内容和页面跳转仍会被禁止。" = "This allows JavaScript and HTTPS external resources in the current HTML file. Untrusted pages may run scripts or send data to external servers. File access, mixed content, and page navigation remain blocked.";
 "仅本次预览开启" = "Enable for this preview";
+"覆盖远端文件？" = "Overwrite the remote file?";
+"覆盖上传" = "Upload and Overwrite";
+"继续覆盖上传" = "Resume Overwrite Upload";

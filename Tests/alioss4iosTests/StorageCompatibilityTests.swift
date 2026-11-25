@@ -274,6 +274,8 @@ final class StorageCompatibilityTests: XCTestCase {
         let ossRequest = try await oss.signUpload(bucket: bucket, key: "a.txt")
         XCTAssertEqual(ossRequest.httpMethod, "PUT")
         XCTAssertEqual(ossRequest.value(forHTTPHeaderField: "x-oss-forbid-overwrite"), "true")
+        let overwriteRequest = try await oss.signUpload(bucket: bucket, key: "a.txt", allowsOverwrite: true)
+        XCTAssertEqual(overwriteRequest.value(forHTTPHeaderField: "x-oss-forbid-overwrite"), "false")
     }
 
     /// 系统上传需持有同一个分片会话标识，签名 URL 也要保留自定义路由和临时令牌。

@@ -10,6 +10,8 @@ import SmithyStreams
 struct UploadTarget: Codable, Hashable {
     let bucket: StorageBucket
     let key: String
+    /// 仅在用户明确确认后构造允许覆盖的 OSS 请求目标。
+    var allowsOverwrite: Bool? = nil
 }
 
 /// 只有服务器确认接受分片后才记录其序号与 ETag。
@@ -44,11 +46,11 @@ extension OssStorage: BackgroundUploadSigning {
     }
 
 
-    /// OSS 的防覆盖依赖 Bucket 未启用版本控制。检查通过再申请上传 ID。
+    /// 普通上传先检查 Bucket 版本控制。明确确认覆盖后直接申请上传 ID。
     func beginMultipartUpload(target: UploadTarget) async throws -> String {
-        try await validateNonOverwritingWrites(bucket: target.bucket)
+        if target.allowsOverwrite != true { try await validateNonOverwritingWrites(bucket: target.bucket) }
         let output = try await makeClient(target.bucket).initiateMultipartUpload(InitiateMultipartUploadRequest(
-            bucket: target.bucket.name, key: target.key, forbidOverwrite: true
+            bucket: target.bucket.name, key: target.key, forbidOverwrite: target.allowsOverwrite != true
         ))
         guard let id = output.uploadId, !id.isEmpty else {
             throw BrowserError.message(appText("OSS 未返回分片上传 ID。"))
@@ -58,8 +60,16 @@ extension OssStorage: BackgroundUploadSigning {
 
     /// SDK 直接读取临时分片文件并校验服务端返回的 ETag。
     func uploadPart(target: UploadTarget, uploadID: String, file: URL, number: Int) async throws -> UploadPartReceipt {
+        try await uploadPartWithAccount(target: target, uploadID: uploadID, file: file, number: number, progress: nil)
+    }
+
+    /// 使用账号签名发送文件分片，可选回调仅报告传输进度，断点以返回的 ETag 为准。
+    func uploadPartWithAccount(
+        target: UploadTarget, uploadID: String, file: URL, number: Int, progress: ProgressClosure?
+    ) async throws -> UploadPartReceipt {
         let output = try await makeClient(target.bucket).uploadPart(AlibabaCloudOSS.UploadPartRequest(
-            bucket: target.bucket.name, key: target.key, partNumber: number, uploadId: uploadID, body: .file(file)
+            bucket: target.bucket.name, key: target.key, partNumber: number, uploadId: uploadID, body: .file(file),
+            progress: progress
         ))
         guard let etag = output.etag, !etag.isEmpty else {
             throw BrowserError.message(appText("OSS 未确认分片完成。"))
@@ -67,11 +77,11 @@ extension OssStorage: BackgroundUploadSigning {
         return UploadPartReceipt(number: number, etag: etag)
     }
 
-    /// 只有完成请求返回目标对象 ETag 才报告上传成功。
+    /// 合并时按任务授权设置覆盖策略，服务端返回目标对象 ETag 才报告成功。
     func completeMultipartUpload(target: UploadTarget, uploadID: String, parts: [UploadPartReceipt]) async throws {
-        try await validateNonOverwritingWrites(bucket: target.bucket)
+        if target.allowsOverwrite != true { try await validateNonOverwritingWrites(bucket: target.bucket) }
         let output = try await makeClient(target.bucket).completeMultipartUpload(CompleteMultipartUploadRequest(
-            bucket: target.bucket.name, key: target.key, forbidOverwrite: true, uploadId: uploadID,
+            bucket: target.bucket.name, key: target.key, forbidOverwrite: target.allowsOverwrite != true, uploadId: uploadID,
             completeMultipartUpload: CompleteMultipartUpload(
                 parts: parts.map { AlibabaCloudOSS.UploadPart(etag: $0.etag, partNumber: $0.number) }
             )

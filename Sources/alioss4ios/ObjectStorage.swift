@@ -240,29 +240,32 @@ struct OssStorage: ObjectStorage, MultipartStorage {
     }
 
     #if os(macOS)
-    /// Mac 前台使用账号签名的 OSS PUT，保留不覆盖条件并报告发送进度。
+    /// Mac 前台使用账号签名的 OSS PUT，应用任务确认的覆盖策略并报告发送进度。
     func uploadFileWithAccount(
-        bucket: StorageBucket, key: String, file: URL, progress: @Sendable @escaping (Int64) -> Void
+        bucket: StorageBucket, key: String, file: URL, allowsOverwrite: Bool = false,
+        progress: @Sendable @escaping (Int64) -> Void
     ) async throws {
         do {
             try Task.checkCancellation()
             _ = try await makeClient(bucket).putObject(PutObjectRequest(
-                bucket: bucket.name, key: key, forbidOverwrite: true, body: .file(file),
+                bucket: bucket.name, key: key, forbidOverwrite: !allowsOverwrite, body: .file(file),
                 progress: ProgressClosure { _, total, _ in progress(total) }
             ))
         } catch let error as ServerError {
-            let status = HTTPURLResponse.localizedString(forStatusCode: error.statusCode)
-            let detail = "HTTP \(error.statusCode) \(status) · \(error.code)"
-            let request = error.requestId.isEmpty ? detail : detail + " · " + error.requestId
-            throw BrowserError.message(appText("上传失败") + " · " + request)
+            throw ossUploadError(error)
         }
     }
     #endif
 
     /// 将禁止覆盖的条件纳入签名，并返回上传必须携带的请求头。
     func signUpload(bucket: StorageBucket, key: String) async throws -> URLRequest {
+        try await signUpload(bucket: bucket, key: key, allowsOverwrite: false)
+    }
+
+    /// 将用户本次确认的覆盖策略纳入 OSS PUT 签名。
+    func signUpload(bucket: StorageBucket, key: String, allowsOverwrite: Bool) async throws -> URLRequest {
         let result = try await makeClient(bucket).presign(
-            PutObjectRequest(bucket: bucket.name, key: key, forbidOverwrite: true),
+            PutObjectRequest(bucket: bucket.name, key: key, forbidOverwrite: !allowsOverwrite),
             Date().addingTimeInterval(3600)
         )
         return try makeUploadURLRequest(result)
@@ -369,4 +372,10 @@ struct OssStorage: ObjectStorage, MultipartStorage {
             }
         }
     }
+}
+
+/// 提取 OSS 上传失败的业务错误和请求 ID，供失败任务展示。
+func ossUploadError(_ error: ServerError) -> BrowserError {
+    let details = [appText("上传失败"), "HTTP \(error.statusCode)", error.code, error.message, error.requestId]
+    return .message(details.filter { !$0.isEmpty }.joined(separator: " · "))
 }

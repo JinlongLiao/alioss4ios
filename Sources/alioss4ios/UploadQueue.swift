@@ -1,6 +1,7 @@
 // Copyright 2026 jinlongliao
 // SPDX-License-Identifier: Apache-2.0
 
+import AlibabaCloudOSS
 import Foundation
 import Observation
 #if os(iOS)
@@ -28,6 +29,8 @@ struct UploadRecord: Codable, Identifiable {
     var uploadID: String?
     var parts: [UploadPartReceipt] = []
     var message = ""
+    /// 覆盖授权随任务持久化，旧历史缺少该字段时默认禁止覆盖。
+    var allowsOverwrite: Bool? = nil
 
     /// 分片至少 8 MiB，较大文件提高片长以保持不超过两个供应商的 10000 片上限。
     var partSize: Int {
@@ -187,7 +190,7 @@ final class UploadQueue {
     }
 
     /// 以队列的当前记录为准，防止界面旧快照使已完成任务重新排队。
-    func resumeUpload(_ record: UploadRecord, profile: StorageProfile?) {
+    func resumeUpload(_ record: UploadRecord, profile: StorageProfile?, confirmOverwrite: Bool = false) {
         guard let current = records.first(where: { $0.id == record.id }),
               activeID != current.id, !discardingIDs.contains(current.id),
               current.status == .paused || current.status == .failed else { return }
@@ -198,6 +201,7 @@ final class UploadQueue {
         if editUploadRecord(current.id, {
             $0.status = .queued
             $0.message = ""
+            if confirmOverwrite && current.provider == .oss { $0.allowsOverwrite = true }
         }) {
             queuedProfiles[current.id] = profile
             notice = nil
@@ -323,8 +327,13 @@ final class UploadQueue {
             }
         } catch {
             let interrupted = Task.isCancelled
-            let description = (error as? BrowserError)?.localizedDescription
-                ?? appText("上传未确认完成。可继续任务，或刷新远端目录核对目标对象。")
+            let description: String
+            if let serverError = error as? ServerError {
+                description = ossUploadError(serverError).localizedDescription
+            } else {
+                description = (error as? BrowserError)?.localizedDescription
+                    ?? appText("上传未确认完成。可继续任务，或刷新远端目录核对目标对象。")
+            }
             editUploadRecord(record.id) {
                 $0.status = interrupted ? .paused : .failed
                 $0.message = interrupted ? "" : description
@@ -338,7 +347,8 @@ final class UploadQueue {
             try await storage.uploadObject(bucket: record.target.bucket, key: record.target.key, file: file)
             return
         }
-        try await storage.validateNonOverwritingWrites(bucket: record.target.bucket)
+        let allowsOverwrite = record.allowsOverwrite == true && storage is OssStorage
+        if !allowsOverwrite { try await storage.validateNonOverwritingWrites(bucket: record.target.bucket) }
         let staged = try await stageUploadPart(file, offset: 0, length: record.size)
         defer { try? FileManager.default.removeItem(at: staged) }
         try validateSource(file, record: record)
@@ -351,7 +361,9 @@ final class UploadQueue {
                 inFlightBytes = 0
             }
             let length = record.size
-            try await oss.uploadFileWithAccount(bucket: record.target.bucket, key: record.target.key, file: staged) {
+            try await oss.uploadFileWithAccount(
+                bucket: record.target.bucket, key: record.target.key, file: staged, allowsOverwrite: allowsOverwrite
+            ) {
                 [weak self] sent in
                 Task { @MainActor in
                     self?.updateSentUploadBytes(sent, limit: length, requestID: requestID)
@@ -360,7 +372,12 @@ final class UploadQueue {
             return
         }
         #endif
-        let request = try await signer.signUpload(bucket: record.target.bucket, key: record.target.key)
+        let request: URLRequest
+        if let oss = storage as? OssStorage, allowsOverwrite {
+            request = try await oss.signUpload(bucket: record.target.bucket, key: record.target.key, allowsOverwrite: true)
+        } else {
+            request = try await signer.signUpload(bucket: record.target.bucket, key: record.target.key)
+        }
         _ = try await transferSignedFile(from: staged, request: request, record: record)
     }
 
@@ -368,11 +385,13 @@ final class UploadQueue {
     private func transferUploadParts(
         _ record: UploadRecord, file: URL, storage: any MultipartStorage
     ) async throws {
+        var target = record.target
+        target.allowsOverwrite = record.allowsOverwrite
         let uploadID: String
         if let savedID = record.uploadID {
             uploadID = savedID
         } else {
-            uploadID = try await storage.beginMultipartUpload(target: record.target)
+            uploadID = try await storage.beginMultipartUpload(target: target)
             guard editUploadRecord(record.id, { $0.uploadID = uploadID }) else {
                 try? await storage.abortMultipartUpload(target: record.target, uploadID: uploadID)
                 throw BrowserError.message(appText("无法保存上传断点。"))
@@ -402,13 +421,33 @@ final class UploadQueue {
 
         try validateSource(file, record: record)
         try Task.checkCancellation()
-        try await storage.completeMultipartUpload(target: record.target, uploadID: uploadID, parts: receipts)
+        try await storage.completeMultipartUpload(target: target, uploadID: uploadID, parts: receipts)
     }
 
     /// 使用当前上传会话发送一片，只接受带 ETag 的成功响应。
     private func transferUploadPart(
         storage: any MultipartStorage, record: UploadRecord, uploadID: String, file: URL, number: Int
     ) async throws -> UploadPartReceipt {
+        #if os(macOS)
+        // Mac 的 OSS 分片与整文件一样使用当前账号签名，继续任务时沿用已保存的上传 ID。
+        if let oss = storage as? OssStorage {
+            let requestID = UUID()
+            inFlightRequestID = requestID
+            defer {
+                inFlightRequestID = nil
+                inFlightBytes = 0
+            }
+            let length = record.partSize
+            let progress = ProgressClosure { [weak self] _, sent, _ in
+                Task { @MainActor in
+                    self?.updateSentUploadBytes(sent, limit: length, requestID: requestID)
+                }
+            }
+            return try await oss.uploadPartWithAccount(
+                target: record.target, uploadID: uploadID, file: file, number: number, progress: progress
+            )
+        }
+        #endif
         guard let signer = storage as? any BackgroundUploadSigning else {
             return try await storage.uploadPart(target: record.target, uploadID: uploadID, file: file, number: number)
         }
