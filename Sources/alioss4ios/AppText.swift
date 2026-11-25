@@ -5,10 +5,13 @@ import Foundation
 
 /// 系统语言或应用内设定决定文案。服务器资源名称和路径始终保留原文。
 func appText(_ key: String) -> String {
-    let setting = UserDefaults.standard.string(forKey: "interfaceLanguage")
-    let preferred = setting.flatMap { $0 == "system" ? nil : $0 }
-        ?? Locale.preferredLanguages.first ?? "zh-Hans"
-    return localizedAppText(key, languageTag: preferred)
+    let setting = UserDefaults.standard.string(forKey: "interfaceLanguage") ?? "system"
+    return localizedAppText(key, languageTag: appLanguageTag(for: setting))
+}
+
+/// 将应用的「跟随系统」选项解析为实际使用的语言。
+func appLanguageTag(for setting: String) -> String {
+    setting == "system" ? (Locale.preferredLanguages.first ?? "zh-Hans") : setting
 }
 
 /// 依据指定语言标记读取应用资源，繁中缺少专用词条时转换简中文案。

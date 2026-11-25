@@ -19,6 +19,7 @@ struct AliOSSApp: App {
     @UIApplicationDelegateAdaptor(IOSApplicationDelegate.self) private var applicationDelegate
     #endif
     @State private var uploadQueue = UploadQueue.shared
+    @State private var selectedTab = BrowserTab.files
     #if os(iOS)
     @Environment(\.scenePhase) private var scenePhase
     #endif
@@ -33,9 +34,21 @@ struct AliOSSApp: App {
 
     var body: some Scene {
         #if os(macOS)
-        Window("alioss4ios", id: "browser") {
+        Window("", id: "browser") {
             appContent.frame(minWidth: 360, minHeight: 420)
         }
+        .commands {
+            MacApplicationCommands(
+                canShowSettings: privacyAccepted,
+                language: appLanguageTag(for: interfaceLanguage),
+                showSettings: { selectedTab = .settings }
+            )
+        }
+        Window(localizedAppText("关于", languageTag: appLanguageTag(for: interfaceLanguage)) + " Alioss4ios", id: "about") {
+            AboutStorageView(isStandaloneWindow: true)
+        }
+        .defaultSize(width: 460, height: 430)
+        .commandsRemoved()
         #else
         WindowGroup("alioss4ios") {
             appContent
@@ -50,7 +63,7 @@ struct AliOSSApp: App {
     private var appContent: some View {
         Group {
             if privacyAccepted {
-                BrowserView().environment(uploadQueue)
+                BrowserView(selectedTab: $selectedTab).environment(uploadQueue)
             } else {
                 AboutStorageView { privacyAccepted = true }
             }
@@ -60,9 +73,50 @@ struct AliOSSApp: App {
 }
 
 #if os(macOS)
+/// 通过系统菜单打开独立关于窗口，设置快捷键沿用主窗口的设置页。
+private struct MacApplicationCommands: Commands {
+    @Environment(\.openWindow) private var openWindow
+    let canShowSettings: Bool
+    let language: String
+    let showSettings: () -> Void
+
+    var body: some Commands {
+        CommandGroup(replacing: .appInfo) {
+            Button(localizedAppText("关于", languageTag: language) + " Alioss4ios") { openWindow(id: "about") }
+        }
+        CommandGroup(replacing: .appSettings) {
+            Button(localizedAppText("设置", languageTag: language) + "…") {
+                showSettings()
+                openWindow(id: "browser")
+            }
+            .keyboardShortcut(",", modifiers: .command)
+            .disabled(!canShowSettings)
+        }
+    }
+}
+
 /// 文件窗口关闭后保留应用级任务。用户退出应用后从断点记录继续。
 private final class MacApplicationDelegate: NSObject, NSApplicationDelegate {
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(languagePreferenceChanged(_:)),
+            name: UserDefaults.didChangeNotification, object: nil
+        )
+    }
+
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
+
+    /// SwiftUI 缓存系统菜单标题。在应用语言改变后刷新已经生成的菜单项。
+    @objc private func languagePreferenceChanged(_ notification: Notification) {
+        DispatchQueue.main.async {
+            guard let items = NSApp.mainMenu?.items.first?.submenu?.items else { return }
+            let supported = ["zh-Hans", "en", "zh-Hant"]
+            for (key, suffix) in [("关于", " Alioss4ios"), ("设置", "…")] {
+                let labels = supported.map { localizedAppText(key, languageTag: $0) + suffix }
+                items.first(where: { labels.contains($0.title) })?.title = appText(key) + suffix
+            }
+        }
+    }
 }
 #endif
 
@@ -79,8 +133,8 @@ private struct BrowserView: View {
     #if os(iOS)
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     #endif
-    /// 与 Android 一致，文件和设置作为一级入口。
-    @State private var selectedTab = BrowserTab.files
+    /// 主窗口和 Mac 应用菜单共用文件及设置选择。
+    @Binding var selectedTab: BrowserTab
     @State private var showsUploads = false
     @State private var showsBackup = false
     @State private var showsPalettePicker = false
@@ -107,6 +161,9 @@ private struct BrowserView: View {
     @State private var pathDraft = ""
     @FocusState private var pathInputFocused: Bool
     @State private var pathResolutionID = UUID()
+    #if os(macOS)
+    @State private var isFileDropTargeted = false
+    #endif
     @State private var showsFileImporter = false
     /// 系统选择器打开后固定账号、Bucket 和前缀，回调不读取已变更的页面状态。
     @State private var pendingUploadDestination: (account: StorageProfile, bucket: StorageBucket, prefix: String)?
@@ -150,6 +207,10 @@ private struct BrowserView: View {
 
     private var profile: StorageProfile? {
         profiles.first { $0.id.uuidString == activeProfileID }
+    }
+
+    init(selectedTab: Binding<BrowserTab>) {
+        _selectedTab = selectedTab
     }
 
     private var storage: (any ObjectStorage)? { profile?.makeStorage() }
@@ -366,12 +427,15 @@ private struct BrowserView: View {
                 if horizontalSizeClass == .compact || columnVisibility == .detailOnly {
                     ToolbarItem(placement: .topBarLeading) { accountSwitcher(maxWidth: 130) }
                 }
+                ToolbarItem(placement: .primaryAction) { browserActions }
                 #else
-                if columnVisibility == .detailOnly {
-                    ToolbarItem(placement: .navigation) { accountSwitcher(maxWidth: 180) }
+                if selectedTab == .files {
+                    if columnVisibility == .detailOnly {
+                        ToolbarItem(placement: .navigation) { accountSwitcher(maxWidth: 180) }
+                    }
+                    ToolbarItem(placement: .primaryAction) { browserActions }
                 }
                 #endif
-                ToolbarItem(placement: .primaryAction) { browserActions }
             }
             #if os(iOS)
             .toolbarBackground(browserSurface, for: .navigationBar)
@@ -380,8 +444,24 @@ private struct BrowserView: View {
             #endif
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background { browserBackdrop.ignoresSafeArea() }
+            #if os(macOS)
+            .dropDestination(for: URL.self) { urls, _ in
+                dropUploadFiles(urls)
+            } isTargeted: { isFileDropTargeted = $0 }
+            .overlay {
+                if isFileDropTargeted && profile != nil && selectedBucket != nil {
+                    RoundedRectangle(cornerRadius: 10)
+                        .strokeBorder(Color.accentColor, style: StrokeStyle(lineWidth: 2, dash: [6, 4]))
+                        .padding(6)
+                        .allowsHitTesting(false)
+                }
+            }
+            #endif
         }
         .navigationSplitViewStyle(.balanced)
+        #if os(macOS)
+        .toolbar(removing: selectedTab == .settings ? .sidebarToggle : nil)
+        #endif
     }
 
     private var browserBackdrop: some View { palette.browserBackdrop(dark: usesDarkTheme) }
@@ -903,8 +983,8 @@ private struct BrowserView: View {
             .formStyle(.grouped)
             .scrollContentBackground(.hidden)
             .background { browserBackdrop.ignoresSafeArea() }
-            .navigationTitle(appText("设置"))
             #if os(iOS)
+            .navigationTitle(appText("设置"))
             .toolbarBackground(browserSurface, for: .navigationBar)
             .toolbarBackground(palette.browserSurface(dark: usesDarkTheme, atBottom: true), for: .tabBar)
             .toolbarBackground(.visible, for: .navigationBar, .tabBar)
@@ -1181,6 +1261,24 @@ private struct BrowserView: View {
         let destination = pendingUploadDestination
         pendingUploadDestination = nil
         guard let destination, case let .success(files) = selection, !files.isEmpty else { return }
+        enqueueUploadFiles(files, to: destination)
+    }
+
+    #if os(macOS)
+    /// 松手时捕获账号、Bucket 与目录。网页 URL 不属于本地上传来源。
+    private func dropUploadFiles(_ urls: [URL]) -> Bool {
+        guard selectedTab == .files, let profile, let selectedBucket else { return false }
+        let files = urls.filter(\.isFileURL)
+        guard !files.isEmpty else { return false }
+        enqueueUploadFiles(files, to: (profile, selectedBucket, prefix))
+        return true
+    }
+    #endif
+
+    /// 文件选择和拖放共用上传队列，排队后切换目录不会更改任务目标。
+    private func enqueueUploadFiles(
+        _ files: [URL], to destination: (account: StorageProfile, bucket: StorageBucket, prefix: String)
+    ) {
         uploadQueue.enqueueUploadFiles(
             files, profile: destination.account, bucket: destination.bucket, prefix: destination.prefix
         )

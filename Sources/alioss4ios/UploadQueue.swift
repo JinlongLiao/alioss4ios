@@ -332,7 +332,7 @@ final class UploadQueue {
         }
     }
 
-    /// 小文件保留直接 PUT，签名包含防覆盖条件，再由系统从同一份暂存文件发送。
+    /// 小文件从同一份暂存文件发送，Mac OSS 走账号 SDK，后台会话仍使用签名请求。
     private func transferSingleUpload(storage: any MultipartStorage, record: UploadRecord, file: URL) async throws {
         guard let signer = storage as? any BackgroundUploadSigning else {
             try await storage.uploadObject(bucket: record.target.bucket, key: record.target.key, file: file)
@@ -342,6 +342,24 @@ final class UploadQueue {
         let staged = try await stageUploadPart(file, offset: 0, length: record.size)
         defer { try? FileManager.default.removeItem(at: staged) }
         try validateSource(file, record: record)
+        #if os(macOS)
+        if let oss = storage as? OssStorage {
+            let requestID = UUID()
+            inFlightRequestID = requestID
+            defer {
+                inFlightRequestID = nil
+                inFlightBytes = 0
+            }
+            let length = record.size
+            try await oss.uploadFileWithAccount(bucket: record.target.bucket, key: record.target.key, file: staged) {
+                [weak self] sent in
+                Task { @MainActor in
+                    self?.updateSentUploadBytes(sent, limit: length, requestID: requestID)
+                }
+            }
+            return
+        }
+        #endif
         let request = try await signer.signUpload(bucket: record.target.bucket, key: record.target.key)
         _ = try await transferSignedFile(from: staged, request: request, record: record)
     }

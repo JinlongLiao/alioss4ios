@@ -109,8 +109,15 @@ enum ObjectTransfer {
     ) async throws -> HTTPURLResponse {
         let delegate = progress.map { SignedRequestDelegate(progress: $0) }
         let (_, response) = try await session.upload(for: request, fromFile: file, delegate: delegate)
-        guard let response = response as? HTTPURLResponse, (200..<300).contains(response.statusCode) else {
-            throw BrowserError.message(appText("上传失败，可能是同名文件冲突、权限或网络问题。"))
+        guard let response = response as? HTTPURLResponse else {
+            throw BrowserError.message(appText("上传未确认完成。可继续任务，或刷新远端目录核对目标对象。"))
+        }
+        guard (200..<300).contains(response.statusCode) else {
+            let status = "HTTP \(response.statusCode) " + HTTPURLResponse.localizedString(forStatusCode: response.statusCode)
+            let requestID = response.value(forHTTPHeaderField: "x-oss-request-id")
+                ?? response.value(forHTTPHeaderField: "x-amz-request-id")
+            let detail = requestID.map { status + " · " + $0 } ?? status
+            throw BrowserError.message(appText("上传失败") + " · " + detail)
         }
         return response
     }
